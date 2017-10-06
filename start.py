@@ -89,7 +89,7 @@ def main(args):
 
     ambari = Ambari(server_url, username='admin', password='admin')
     for node in secondary_nodes[1:]:
-        logger.debug('Adding %s to cluster ...', node.fqdn)
+        logger.info('Adding %s to cluster ...', node.fqdn)
         ambari.clusters('cluster').hosts.create(node.fqdn)
         for component in ambari.clusters('cluster').hosts(secondary_nodes[0].fqdn).components:
             logger.debug('Adding component (%s) to cluster on host (%s) ...',
@@ -103,6 +103,7 @@ def main(args):
         ambari.clusters('cluster').hosts(node.fqdn).components.install().wait()
 
     if not args.dont_start_cluster:
+        logger.info('Starting cluster services ...')
         ambari.clusters('cluster').services.start().wait()
 
 
