@@ -18,6 +18,7 @@ with the ``clusterdock`` script:
 .. code-block:: console
 
     $ git clone https://github.com/clusterdock/topology_hdp.git
+    $ pip3 install topology_hdp/requirements.txt
     $ clusterdock start topology_hdp
 
 To see full usage instructions for the ``start`` action, use ``-h``/``--help``:
