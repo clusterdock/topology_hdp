@@ -59,18 +59,7 @@ def main(args):
     # larger than 2 nodes is started, some modifications need to be done.
     if len(secondary_nodes) > 1:
         _remove_files(nodes=secondary_nodes[1:],
-                      files=['/hadoop/hdfs/current/*'])
-
-    # logger.debug('Waiting for PostgreSQL to be started ...')
-    # def condition(node):
-    #     return node.execute('service postgresql status') == 0
-    # def success(time):
-    #     logger.debug('PostgreSQL became started after %s seconds.', time)
-    # def failure(timeout):
-    #     raise TimeoutError('Timed out after {} seconds waiting for '
-    #                        'PostgreSQL to become started.'.format(timeout))
-    # wait_for_condition(condition=condition, condition_args=[primary_node],
-    #                    success=success, failure=failure)
+                      files=['/hadoop/hdfs/data/current/*'])
 
     logger.info('Starting Ambari server ...')
     primary_node.execute('ambari-server start', quiet=not args.verbose)
@@ -88,6 +77,14 @@ def main(args):
         node.execute('ambari-agent start', quiet=not args.verbose)
 
     ambari = Ambari(server_url, username='admin', password='admin')
+
+    def condition(ambari, cluster):
+        cluster_hosts = {node.fqdn for node in cluster}
+        ambari_hosts = {host.host_name for host in ambari.hosts}
+        logger.debug('Cluster hosts: %s; Ambari hosts: %s', cluster_hosts, ambari_hosts)
+        return cluster_hosts == ambari_hosts
+    wait_for_condition(condition=condition, condition_args=[ambari, cluster])
+
     for node in secondary_nodes[1:]:
         logger.info('Adding %s to cluster ...', node.fqdn)
         ambari.clusters('cluster').hosts.create(node.fqdn)
@@ -149,7 +146,7 @@ def _update_node_names(cluster, quiet):
 
 
 def _remove_files(nodes, files):
-    command = 'rm -rf {}'.format(' '.join(files))
+    command = 'sh -c "rm -rf {}"'.format(' '.join(files))
     logger.info('Removing files (%s) from nodes (%s) ...',
                 ', '.join(files),
                 ', '.join(node.fqdn for node in nodes))
