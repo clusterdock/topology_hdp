@@ -100,6 +100,13 @@ def main(args):
         ambari.clusters('cluster').hosts(node.fqdn).components.install().wait()
 
     if not args.dont_start_cluster:
+        logger.debug('Waiting for all hosts to reach healthy state before starting cluster ...')
+        def condition(ambari):
+            health_report = ambari.clusters('cluster').health_report
+            logger.debug('Ambari cluster health report: %s ...', health_report)
+            return health_report.get('Host/host_state/HEALTHY') == len(list(ambari.hosts))
+        wait_for_condition(condition=condition, condition_args=[ambari])
+
         logger.info('Starting cluster services ...')
         ambari.clusters('cluster').services.start().wait()
 
