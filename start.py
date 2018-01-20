@@ -20,7 +20,7 @@ import textwrap
 from ambariclient.client import Ambari
 
 from clusterdock.models import Cluster, client, Node
-from clusterdock.utils import nested_get, wait_for_condition
+from clusterdock.utils import wait_for_condition
 
 logger = logging.getLogger('clusterdock.{}'.format(__name__))
 
@@ -28,6 +28,8 @@ DEFAULT_NAMESPACE = 'clusterdock'
 
 AMBARI_AGENT_CONFIG_FILE_PATH = '/etc/ambari-agent/conf/ambari-agent.ini'
 AMBARI_PORT = 8080
+HBASE_THRIFT_SERVER_PORT = 9090
+HBASE_THRIFT_SERVER_INFO_PORT = 9095
 
 
 def main(args):
@@ -101,6 +103,7 @@ def main(args):
 
     if not args.dont_start_cluster:
         logger.debug('Waiting for all hosts to reach healthy state before starting cluster ...')
+
         def condition(ambari):
             health_report = ambari.clusters('cluster').health_report
             logger.debug('Ambari cluster health report: %s ...', health_report)
@@ -109,6 +112,10 @@ def main(args):
 
         logger.info('Starting cluster services ...')
         ambari.clusters('cluster').services.start().wait()
+
+        logger.info('Starting Thrift server ...')
+        thrift_command = '/usr/hdp/current/hbase-master/bin/hbase-daemon.sh start thrift -p {} --infoport {}'
+        primary_node.execute(thrift_command.format(HBASE_THRIFT_SERVER_PORT, HBASE_THRIFT_SERVER_INFO_PORT))
 
 
 def _update_node_names(cluster, quiet):
