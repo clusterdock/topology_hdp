@@ -114,8 +114,9 @@ def main(args):
         ambari.clusters('cluster').services.start().wait()
 
         logger.info('Starting Thrift server ...')
-        thrift_command = '/usr/hdp/current/hbase-master/bin/hbase-daemon.sh start thrift -p {} --infoport {}'
-        primary_node.execute(thrift_command.format(HBASE_THRIFT_SERVER_PORT, HBASE_THRIFT_SERVER_INFO_PORT))
+        primary_node.execute('/usr/hdp/current/hbase-master/bin/hbase-daemon.sh start thrift '
+                             '-p {} --infoport {}'.format(HBASE_THRIFT_SERVER_PORT,
+                                                          HBASE_THRIFT_SERVER_INFO_PORT))
 
 
 def _update_node_names(cluster, quiet):
