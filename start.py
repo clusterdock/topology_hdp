@@ -101,15 +101,25 @@ def main(args):
                      node.fqdn)
         ambari.clusters('cluster').hosts(node.fqdn).components.install().wait()
 
+    logger.info('Waiting for all hosts to reach healthy state ...')
+    def condition(ambari):
+        health_report = ambari.clusters('cluster').health_report
+        logger.debug('Ambari cluster health report: %s ...', health_report)
+        return health_report.get('Host/host_state/HEALTHY') == len(list(ambari.hosts))
+    wait_for_condition(condition=condition, condition_args=[ambari])
+
+    logger.info('Waiting for components to be ready ...')
+    def condition(ambari):
+        comps = ambari.clusters('cluster').cluster.host_components.refresh()
+        for comp in comps:
+            if comp.state.upper() == 'UNKNOWN':
+                logger.debug('Not ready with component `%s` ...', comp.component_name)
+                return False
+        else:
+            return True
+    wait_for_condition(condition=condition, condition_args=[ambari])
+
     if not args.dont_start_cluster:
-        logger.debug('Waiting for all hosts to reach healthy state before starting cluster ...')
-
-        def condition(ambari):
-            health_report = ambari.clusters('cluster').health_report
-            logger.debug('Ambari cluster health report: %s ...', health_report)
-            return health_report.get('Host/host_state/HEALTHY') == len(list(ambari.hosts))
-        wait_for_condition(condition=condition, condition_args=[ambari])
-
         logger.info('Starting cluster services ...')
         ambari.clusters('cluster').services.start().wait()
 
@@ -142,11 +152,8 @@ def _update_node_names(cluster, quiet):
     host_name_changes = {'cluster': {'node-1.cluster': cluster.primary_node.fqdn,
                                      'node-2.cluster': cluster.secondary_nodes[0].fqdn}}
     cluster.primary_node.put_file('/root/host_name_changes.json', json.dumps(host_name_changes))
-    command = ("/usr/jdk64/jdk1.8.0_112/bin/java -cp "
-               "'/etc/ambari-server/conf:/usr/lib/ambari-server/*:"
-               "/usr/share/java/postgresql-jdbc.jar' "
-               "org.apache.ambari.server.update.HostUpdateHelper "
-               "/root/host_name_changes.json > /var/log/ambari-server/ambari-server.out 2>&1")
+    command = ('yes | ambari-server update-host-names /root/host_name_changes.json > '
+               '/var/log/ambari-server/ambari-server.out 2>&1')
     cluster.primary_node.execute(command)
 
     for node in cluster:
