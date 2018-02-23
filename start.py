@@ -142,6 +142,11 @@ def main(args):
         return health_report.get('Host/host_state/HEALTHY') == len(list(ambari.hosts))
     wait_for_condition(condition=condition, condition_args=[ambari])
 
+    if not args.dont_start_cluster:
+        logger.info('Adding `sdc` HDFS proxy user ...')
+        core_site_items = ambari.clusters('cluster').configurations('core-site').items
+        core_site_items.create(properties={'hadoop.proxyuser.sdc.groups': '*', 'hadoop.proxyuser.sdc.hosts': '*'})
+
     logger.info('Waiting for components to be ready ...')
     def condition(ambari):
         comps = ambari.clusters(DEFAULT_CLUSTER_NAME).cluster.host_components.refresh()
@@ -168,6 +173,12 @@ def main(args):
             primary_node.execute('{} start thrift -p {} '
                                  '--infoport {}'.format(hbase_daemon_path, HBASE_THRIFT_SERVER_PORT,
                                                         HBASE_THRIFT_SERVER_INFO_PORT), quiet=quiet)
+
+        logger.info('Creating `sdc` user directory in HDFS ...')
+        primary_node.execute('sudo -u hdfs hdfs dfs -mkdir /user/sdc', quiet=not args.verbose)
+        primary_node.execute('sudo -u hdfs hdfs dfs -chown sdc:sdc /user/sdc', quiet=not args.verbose)
+    else:
+        logger.warn('`sdc` HDFS proxy user and HDFS user/dir setup not done in `dont-start-cluster` mode')
 
 
 def _update_node_names(cluster, quiet):
