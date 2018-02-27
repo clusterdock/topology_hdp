@@ -66,3 +66,40 @@ To see full usage instructions for the ``start`` action, use ``-h``/``--help``:
       --secondary-nodes node [node ...]
                             Nodes of the secondary-nodes group (default:
                             ['node-2'])
+
+To see full usage instructions for the ``build`` action, use ``-h``/``--help``:
+
+.. code-block:: console
+
+    $ clusterdock build topology_hdp -h
+    usage: clusterdock build [--namespace ns] [--network nw] [-o sys] [-r url]
+                             [-h] [--bare] [--retain] [--hdp-version ver] [--push]
+                             [--ambari-version ver]
+                             topology
+
+    Build images for the HDP topology
+
+    positional arguments:
+      topology              A clusterdock topology directory
+
+    optional arguments:
+      --namespace ns        Namespace to use when looking for images (default:
+                            None)
+      --network nw          Docker network to use (default: cluster)
+      -o sys, --operating-system sys
+                            Operating system to use for cluster nodes (default:
+                            None)
+      -r url, --registry url
+                            Docker Registry from which to pull images (default:
+                            docker.io)
+      -h, --help            show this help message and exit
+
+    HDP arguments:
+      --hdp-version ver     HDP version to use (default: 2.6.4.0)
+      --ambari-version ver  Ambari version to use (default: 2.6.1.0)
+      --bare                If specified, will build a bare minimum cluster with
+                            mandatory services (default: False)
+      --retain              If specified, will retain (not remove) the built Docker containers
+                            (default: False)
+      --push                If specified, will push the built Docker image to
+                            Docker registry (default: False)

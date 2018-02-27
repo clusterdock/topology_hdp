@@ -37,7 +37,7 @@ build args:
         help: If specified, will push the built Docker image to Docker registry
     --retain:
         action: store_true
-        help: If specified, will retain the built Docker containers
+        help: If specified, will retain (not remove) the built Docker containers
 
 start args:
     --hdp-version:
