@@ -20,7 +20,7 @@ from ambariclient.client import Ambari
 
 from clusterdock.config import defaults
 from clusterdock.models import Cluster, client, Node
-from clusterdock.utils import version_tuple, wait_for_condition
+from clusterdock.utils import print_topology_meta, version_tuple, wait_for_condition
 
 logger = logging.getLogger('clusterdock.{}'.format(__name__))
 
@@ -81,6 +81,7 @@ DEFAULT_CLUSTER_HOST_MAPPING = [{'name': 'primary', 'hosts': [{'fqdn': None}]},
 
 def main(args):
     quiet = not args.verbose
+    print_topology_meta(args.topology)
 
     image = '{}/topology_nodebase:{}'.format(defaults['DEFAULT_REPOSITORY'],
                                              args.operating_system or DEFAULT_OPERATING_SYSTEM)

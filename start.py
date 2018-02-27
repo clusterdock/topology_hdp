@@ -21,7 +21,7 @@ import time
 from ambariclient.client import Ambari
 
 from clusterdock.models import Cluster, client, Node
-from clusterdock.utils import version_tuple, wait_for_condition
+from clusterdock.utils import print_topology_meta, version_tuple, wait_for_condition
 
 logger = logging.getLogger('clusterdock.{}'.format(__name__))
 
@@ -36,6 +36,8 @@ HBASE_THRIFT_SERVER_INFO_PORT = 9095
 
 def main(args):
     quiet = not args.verbose
+    print_topology_meta(args.topology)
+
     if args.include_services and args.exclude_services:
             raise ValueError('Cannot pass both --include-services and --exclude-services.')
 
