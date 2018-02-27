@@ -18,12 +18,12 @@ import time
 
 from ambariclient.client import Ambari
 
+from clusterdock.config import defaults
 from clusterdock.models import Cluster, client, Node
 from clusterdock.utils import version_tuple, wait_for_condition
 
 logger = logging.getLogger('clusterdock.{}'.format(__name__))
 
-DEFAULT_NAMESPACE = 'clusterdock'
 DEFAULT_OPERATING_SYSTEM = 'centos6.8'
 
 AMBARI_AGENT_CONFIG_FILE_PATH = '/etc/ambari-agent/conf/ambari-agent.ini'
@@ -82,9 +82,8 @@ DEFAULT_CLUSTER_HOST_MAPPING = [{'name': 'primary', 'hosts': [{'fqdn': None}]},
 def main(args):
     quiet = not args.verbose
 
-    image = '{}/{}/topology_nodebase:{}'.format(args.registry,
-                                                args.namespace or DEFAULT_NAMESPACE,
-                                                args.operating_system or DEFAULT_OPERATING_SYSTEM)
+    image = '{}/topology_nodebase:{}'.format(defaults['DEFAULT_REPOSITORY'],
+                                             args.operating_system or DEFAULT_OPERATING_SYSTEM)
     primary_node = Node(hostname='node-1', group='nodes', image=image,
                         ports=[{AMBARI_PORT: AMBARI_PORT}])
     secondary_node = Node(hostname='node-2', group='nodes', image=image)
@@ -218,7 +217,7 @@ def main(args):
         node.execute('; '.join(['yum clean all',
                                 'cat /dev/null > ~/.bash_history && history -c']), quiet=quiet)
 
-    repository = '{}/{}/topology_hdp'.format(args.registry, args.namespace or DEFAULT_NAMESPACE)
+    repository = '{}/topology_hdp'.format(args.repository or defaults['DEFAULT_REPOSITORY'])
     tag_prefix = 'hdp{}_ambari{}'.format(args.hdp_version, args.ambari_version)
     primary_node_tag = '{}_{}'.format(tag_prefix, 'primary-node')
     secondary_node_tag = '{}_{}'.format(tag_prefix, 'secondary-node')
