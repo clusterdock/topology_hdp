@@ -56,7 +56,7 @@ def main(args):
     secondary_nodes = [Node(hostname=hostname, group='secondary', image=secondary_node_image)
                        for hostname in args.secondary_nodes]
 
-    cluster = Cluster(primary_node, *secondary_nodes)
+    cluster = Cluster(primary_node, *secondary_nodes, name=args.cluster_name)
     cluster.primary_node = primary_node
     cluster.secondary_nodes = secondary_nodes
     cluster.start(args.network)
@@ -94,7 +94,8 @@ def main(args):
 
     # Docker for Mac exposes ports that can be accessed only with ``localhost:<port>`` so
     # use that instead of the hostname if the host name is ``moby``.
-    hostname = 'localhost' if client.info().get('Name') == 'moby' else socket.gethostname()
+    hostname = ('localhost' if client.info().get('Name') == 'moby'
+                else socket.getaddrinfo(socket.gethostname(), 0, flags=socket.AI_CANONNAME)[0][3])
     port = cluster.primary_node.host_ports.get(AMBARI_PORT)
     server_url = 'http://{}:{}'.format(hostname, port)
     logger.info('Ambari server is now reachable at %s', server_url)
