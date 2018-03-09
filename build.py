@@ -146,7 +146,7 @@ def main(args):
         'ambari-server setup --jdbc-db=mysql --jdbc-driver=/tmp/mysql-connector-java.jar',
         'rm -rf /tmp/mysql-connector-java*'
     ]
-    primary_node.execute('; '.join(mysql_config_commands), quiet=quiet)
+    primary_node.execute(' && '.join(mysql_config_commands), quiet=quiet)
 
     # Docker for Mac exposes ports that can be accessed only with ``localhost:<port>`` so
     # use that instead of the hostname if the host name is ``moby``.
@@ -174,6 +174,7 @@ def main(args):
                                                                verify_base_url=False)
     logger.info('Installing cluster components ...')
     hdp_cluster = ambari.clusters('cluster')
+    # INSTALL_ONLY option not applicable for <= 2.0.13.0 ver, it will be install and start services.
     if hdp_version_tuple <= (2, 0, 13, 0):
         hdp_cluster = hdp_cluster.create(blueprint='cluster', default_password='hadoop',
                                          host_groups=DEFAULT_CLUSTER_HOST_MAPPING)

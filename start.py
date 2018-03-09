@@ -16,7 +16,6 @@ import logging
 import re
 import socket
 import textwrap
-import time
 
 from ambariclient.client import Ambari
 
@@ -67,19 +66,16 @@ def main(args):
     # Need this as init system in Docker misreports on postgres start initially
     # Check https://github.com/docker-library/postgres/issues/146 for more
     def condition():
-        if '1 row' not in primary_node.execute('PGPASSWORD=bigdata psql ambari '
-                                               '-U ambari -h localhost -c "select 1"',
-                                               quiet=quiet).output:
-            primary_node.execute('service postgresql restart', quiet=quiet)
-            time.sleep(1)
-            return False
-        return True
-    wait_for_condition(condition=condition)
+        primary_node.execute('service postgresql restart', quiet=quiet)
+        if '1 row' in primary_node.execute('PGPASSWORD=bigdata psql ambari '
+                                           '-U ambari -h localhost -c "select 1"',
+                                           quiet=quiet).output:
+            return True
+    wait_for_condition(condition=condition, time_between_checks=2)
 
     def condition():
-        if 'running' not in primary_node.execute('service postgresql status', quiet=quiet).output:
-            return False
-        return True
+        if 'running' in primary_node.execute('service postgresql status', quiet=quiet).output:
+            return True
     wait_for_condition(condition=condition)
 
     _update_node_names(cluster, quiet=quiet)
