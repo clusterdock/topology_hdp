@@ -20,25 +20,43 @@ node groups:
     secondary-nodes:
         - node-2
 
-start args:
+build args:
     --hdp-version:
-        default: 2.6.2
+        default: 2.6.4.0
         help: HDP version to use
         metavar: ver
     --ambari-version:
-        default: 2.5.2.0
+        default: 2.6.1.0
+        help: Ambari version to use
+        metavar: ver
+    --bare:
+        action: store_true
+        help: If specified, will build a bare minimum cluster with mandatory services
+    --push:
+        action: store_true
+        help: If specified, will push the built Docker image to Docker registry
+    --retain:
+        action: store_true
+        help: If specified, will retain (not remove) the built Docker containers
+
+start args:
+    --hdp-version:
+        default: 2.6.4.0
+        help: HDP version to use
+        metavar: ver
+    --ambari-version:
+        default: 2.6.1.0
         help: Ambari version to use
         metavar: ver
     --dont-start-cluster:
         action: store_true
         help: Don't start clusters in Apache Ambari
-    # TODO: Implement the following...
-    # --exclude-services, -x:
-    #     help: If specified, a comma-separated list of service types to exclude from the HDP cluster
-    #     metavar: svc1,svc2,...
-    # --include-services, -i:
-    #     help: If specified, a comma-separated list of service types to include in the HDP cluster
-    #     metavar: svc1,svc2,...
+    --exclude-services, -x:
+        help: If specified, a comma-separated list of service types to exclude from the HDP cluster
+        metavar: svc1,svc2,...
+    --include-services, -i:
+        help: If specified, a comma-separated list of service types to include in the HDP cluster
+        metavar: svc1,svc2,...
     --predictable:
         action: store_true
         help: If specified, attempt to expose container ports to the same port number on the host
