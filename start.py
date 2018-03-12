@@ -145,7 +145,8 @@ def main(args):
     if not args.dont_start_cluster:
         logger.info('Adding `sdc` HDFS proxy user ...')
         core_site_items = ambari.clusters('cluster').configurations('core-site').items
-        core_site_items.create(properties={'hadoop.proxyuser.sdc.groups': '*', 'hadoop.proxyuser.sdc.hosts': '*'})
+        core_site_items.create(properties_to_update={'hadoop.proxyuser.sdc.groups': '*',
+                                                     'hadoop.proxyuser.sdc.hosts': '*'})
 
     logger.info('Waiting for components to be ready ...')
     def condition(ambari):
