@@ -44,8 +44,6 @@ To see full usage instructions for the ``start`` action, use ``-h``/``--help``:
     optional arguments:
       --always-pull         Pull latest images, even if they're available locally
                             (default: False)
-      -c name, --cluster-name name
-                            Cluster name to use (default: None)
       --namespace ns        Namespace to use when looking for images (default:
                             None)
       -n nw, --network nw   Docker network to use (default: cluster)
