@@ -55,7 +55,7 @@ def main(args):
     secondary_nodes = [Node(hostname=hostname, group='secondary', image=secondary_node_image)
                        for hostname in args.secondary_nodes]
 
-    cluster = Cluster(primary_node, *secondary_nodes, name=args.cluster_name)
+    cluster = Cluster(primary_node, *secondary_nodes)
     cluster.primary_node = primary_node
     cluster.secondary_nodes = secondary_nodes
     cluster.start(args.network)
