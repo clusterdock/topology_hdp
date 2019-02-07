@@ -18,13 +18,13 @@ import time
 
 from ambariclient.client import Ambari
 
+import clusterdock.models as models
 from clusterdock.config import defaults
-from clusterdock.models import Cluster, client, Node
 from clusterdock.utils import print_topology_meta, version_tuple, wait_for_condition
 
 logger = logging.getLogger('clusterdock.{}'.format(__name__))
 
-DEFAULT_OPERATING_SYSTEM = 'centos6.8'
+DEFAULT_OPERATING_SYSTEM = 'centos7.4'
 
 AMBARI_AGENT_CONFIG_FILE_PATH = '/etc/ambari-agent/conf/ambari-agent.ini'
 AMBARI_PORT = 8080
@@ -59,6 +59,19 @@ EXTRA_HOST_GROUPS_2_4_0_0 = [
                     {'name': 'PIG'}, {'name': 'SLIDER'}, {'name': 'HBASE_REGIONSERVER'},
                     {'name': 'HBASE_CLIENT'}, {'name': 'HIVE_CLIENT'}]}]
 
+EXTRA_HOST_GROUPS_3_1_0_0 = [
+    {'components': [{'name': 'HIVE_SERVER'}, {'name': 'SPARK2_CLIENT'}, {'name': 'HBASE_MASTER'},
+                    {'name': 'HIVE_METASTORE'}, {'name': 'TEZ_CLIENT'},
+                    {'name': 'SPARK2_JOBHISTORYSERVER'},
+                    {'name': 'KAFKA_BROKER'},
+                    {'name': 'MYSQL_SERVER'}, {'name': 'PIG'}, {'name': 'AMBARI_SERVER'},
+                    {'name': 'HBASE_CLIENT'},
+                    {'name': 'HIVE_CLIENT'}]},
+    {'components': [{'name': 'SPARK2_CLIENT'}, {'name': 'TEZ_CLIENT'},
+                    {'name': 'PIG'},
+                    {'name': 'HBASE_REGIONSERVER'}, {'name': 'HBASE_CLIENT'},
+                    {'name': 'HIVE_CLIENT'}]}]
+
 DEFAULT_EXTRA_HOST_GROUPS = [
     {'components': [{'name': 'HIVE_SERVER'}, {'name': 'SPARK2_CLIENT'}, {'name': 'HBASE_MASTER'},
                     {'name': 'HIVE_METASTORE'}, {'name': 'TEZ_CLIENT'}, {'name': 'HCAT'},
@@ -83,12 +96,15 @@ def main(args):
     quiet = not args.verbose
     print_topology_meta(args.topology)
 
+    models.LOCALTIME_MOUNT = False
+    models.PRIVILEGED_CONTAINER = True # 'privileged' containers are needed to have systemd work with no issues
+
+    os_major_version = (args.operating_system or DEFAULT_OPERATING_SYSTEM)[6] # always assume 'centosX'
     image = '{}/topology_nodebase:{}'.format(defaults['DEFAULT_REPOSITORY'],
                                              args.operating_system or DEFAULT_OPERATING_SYSTEM)
-    primary_node = Node(hostname='node-1', group='nodes', image=image,
-                        ports=[{AMBARI_PORT: AMBARI_PORT}])
-    secondary_node = Node(hostname='node-2', group='nodes', image=image)
-    cluster = Cluster(primary_node, secondary_node)
+    primary_node = models.Node(hostname='node-1', group='nodes', image=image, ports=[{AMBARI_PORT: AMBARI_PORT}])
+    secondary_node = models.Node(hostname='node-2', group='nodes', image=image)
+    cluster = models.Cluster(primary_node, secondary_node)
     cluster.start(args.network)
 
     hdp_version_tuple = version_tuple(args.hdp_version)
@@ -104,6 +120,9 @@ def main(args):
         elif hdp_version_tuple <= (2, 4, 0, 0):
             host_groups[0]['components'].extend(EXTRA_HOST_GROUPS_2_4_0_0[0]['components'])
             host_groups[1]['components'].extend(EXTRA_HOST_GROUPS_2_4_0_0[1]['components'])
+        elif hdp_version_tuple <= (3, 1, 0, 0):
+            host_groups[0]['components'].extend(EXTRA_HOST_GROUPS_3_1_0_0[0]['components'])
+            host_groups[1]['components'].extend(EXTRA_HOST_GROUPS_3_1_0_0[1]['components'])
         else:
             host_groups[0]['components'].extend(DEFAULT_EXTRA_HOST_GROUPS[0]['components'])
             host_groups[1]['components'].extend(DEFAULT_EXTRA_HOST_GROUPS[1]['components'])
@@ -113,11 +132,11 @@ def main(args):
                                                    host_groups[0]['components']))
 
     repo_url_host = 'http://public-repo-1.hortonworks.com'
-    ambari_repo_url = ('{}/ambari/centos6/{}.x/updates/{}/'
-                       'ambari.repo'.format(repo_url_host, args.ambari_version[0],
+    ambari_repo_url = ('{}/ambari/centos{}/{}.x/updates/{}/'
+                       'ambari.repo'.format(repo_url_host, os_major_version, args.ambari_version[0],
                                             args.ambari_version))
-    hdp_repo_url = ('{}/HDP/centos6/{}.x/updates/{}'.format(repo_url_host, args.hdp_version[0],
-                                                            args.hdp_version))
+    hdp_repo_url = ('{}/HDP/centos{}/{}.x/updates/{}'.format(repo_url_host, os_major_version, args.hdp_version[0],
+                                                             args.hdp_version))
 
     for node in cluster:
         node.execute('wget -nv {} -O /etc/yum.repos.d/ambari.repo'.format(ambari_repo_url),
@@ -150,7 +169,7 @@ def main(args):
 
     # Docker for Mac exposes ports that can be accessed only with ``localhost:<port>`` so
     # use that instead of the hostname if the host name is ``moby``.
-    hostname = ('localhost' if client.info().get('Name') == 'moby'
+    hostname = ('localhost' if models.client.info().get('Name') == 'moby'
                 else socket.getaddrinfo(socket.gethostname(), 0, flags=socket.AI_CANONNAME)[0][3])
     port = primary_node.host_ports.get(AMBARI_PORT)
     server_url = 'http://{}:{}'.format(hostname, port)
