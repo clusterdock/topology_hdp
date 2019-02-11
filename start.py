@@ -58,6 +58,13 @@ def main(args):
     cluster = Cluster(primary_node, *secondary_nodes)
     cluster.primary_node = primary_node
     cluster.secondary_nodes = secondary_nodes
+
+    for node in cluster.nodes:
+        node.volumes.append({'/sys/fs/cgroup': '/sys/fs/cgroup'})
+        # do not use tempfile.mkdtemp, as systemd wont be able to bring services up when temp ends to be created in
+        # /var/tmp/ directory
+        node.volumes.append(['/run', '/run/lock'])
+
     cluster.start(args.network)
 
     hdp_version_tuple = version_tuple(args.hdp_version)
