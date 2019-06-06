@@ -11,11 +11,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Ambari logon credentials: admin / admin
+# Atlas logon credentials: admin / hadoop (3.X versions) and admin / admin (2.X versions)
+
 import json
 import logging
 import re
 import socket
 import textwrap
+import time
 
 from ambariclient.client import Ambari
 
@@ -28,9 +32,11 @@ DEFAULT_NAMESPACE = 'clusterdock'
 
 AMBARI_AGENT_CONFIG_FILE_PATH = '/etc/ambari-agent/conf/ambari-agent.ini'
 AMBARI_PORT = 8080
-DEFAULT_CLUSTER_NAME = 'cluster'
 HBASE_THRIFT_SERVER_PORT = 9090
 HBASE_THRIFT_SERVER_INFO_PORT = 9095
+
+DEFAULT_ATLAS_REST_PORT = 21000
+DEFAULT_CLUSTER_NAME = 'cluster'
 
 
 def main(args):
@@ -85,6 +91,7 @@ def main(args):
             return True
     wait_for_condition(condition=condition)
 
+    time.sleep(10) # If images are set to start Ambari server/agents - give some time to recover the right status
     _update_node_names(cluster, quiet=quiet)
 
     # The HDP topology uses two pre-built images ('primary' and 'secondary'). If a cluster
@@ -149,6 +156,16 @@ def main(args):
         return health_report.get('Host/host_state/HEALTHY') == len(list(ambari.hosts))
     wait_for_condition(condition=condition, condition_args=[ambari])
 
+    service_names = [service['service_name'] for service in
+                     ambari.clusters(DEFAULT_CLUSTER_NAME).services.to_dict()]
+
+    if 'ATLAS' in service_names:
+        logger.info('Configuring Atlas required properties ...')
+        _configure_atlas(ambari, args.hdp_version, atlas_server_host=cluster.primary_node.fqdn)
+
+    if 'HIVE' in service_names:
+        primary_node.execute('touch /etc/hive/sys.db.created', quiet=quiet)
+
     logger.info('Waiting for components to be ready ...')
     def condition(ambari):
         comps = ambari.clusters(DEFAULT_CLUSTER_NAME).cluster.host_components.refresh()
@@ -164,8 +181,6 @@ def main(args):
         logger.info('Starting cluster services ...')
         ambari.clusters(DEFAULT_CLUSTER_NAME).services.start().wait(timeout=3600)
 
-        service_names = [service['service_name'] for service in
-                         ambari.clusters(DEFAULT_CLUSTER_NAME).services.to_dict()]
         if 'HBASE' in service_names:
             logger.info('Starting Thrift server ...')
             if hdp_version_tuple <= (2, 0, 13, 0):
@@ -178,15 +193,6 @@ def main(args):
 
 
 def _update_node_names(cluster, quiet):
-    logger.info('Stopping Ambari server ...')
-    command = cluster.primary_node.execute('ambari-server stop', quiet=quiet)
-    if command.exit_code != 0:
-        raise Exception('Ambari server returned non-zero exit code ({}) while '
-                        'stopping. Full output:'
-                        '\n{}'.format(command.exit_code,
-                                      textwrap.indent(command.output,
-                                                      prefix='    ')))
-
     logger.info('Stopping Ambari agents ...')
     commands = cluster.execute('ambari-agent stop', quiet=quiet)
     for node, command in commands.items():
@@ -195,6 +201,15 @@ def _update_node_names(cluster, quiet):
                             'stopping. Full output:'
                             '\n{}'.format(node, command.exit_code,
                                           textwrap.indent(command.output, prefix='    ')))
+
+    logger.info('Stopping Ambari server ...')
+    command = cluster.primary_node.execute('ambari-server stop', quiet=quiet)
+    if command.exit_code != 0:
+        raise Exception('Ambari server returned non-zero exit code ({}) while '
+                        'stopping. Full output:'
+                        '\n{}'.format(command.exit_code,
+                                      textwrap.indent(command.output,
+                                                      prefix='    ')))
 
     logger.debug('Creating host name changes JSON ...')
     host_name_changes = {DEFAULT_CLUSTER_NAME: {'node-1.cluster': cluster.primary_node.fqdn,
@@ -222,3 +237,170 @@ def _remove_files(nodes, files, quiet):
                 ', '.join(node.fqdn for node in nodes))
     for node in nodes:
         node.execute(command=command, quiet=quiet)
+
+
+def _configure_atlas(ambari, hdp_version, atlas_server_host):
+    hdp_version_tuple = version_tuple(hdp_version)
+    stack_version = '{}.{}'.format(hdp_version_tuple[0], hdp_version_tuple[1])
+    stack_version_tuple = (hdp_version_tuple[0], hdp_version_tuple[1])
+
+    core_site_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('core-site').items
+    core_site_items.create(properties_to_update={
+        'hadoop.proxyuser.hdfs.groups': '*',
+        'hadoop.proxyuser.hdfs.hosts': '*',
+        'hadoop.proxyuser.hive.hosts': atlas_server_host,
+        'hadoop.proxyuser.livy.groups': '*',
+        'hadoop.proxyuser.livy.hosts': '*',
+        'hadoop.proxyuser.root.groups': '*',
+        'hadoop.proxyuser.root.hosts': atlas_server_host})
+    # Doesnt work - delete not available in ambari client - can ignore for now, TODO
+    # core_site_items.delete(properties=['hadoop.security.key.provider.path'])
+
+    if stack_version_tuple < (3, 0):
+        hdfs_data_dir_items = '/hadoop/hdfs/data,/run/hadoop/hdfs/data,/run/lock/hadoop/hdfs/data'
+        hdfs_name_dir_items = '/hadoop/hdfs/namenode,/run/hadoop/hdfs/namenode,/run/lock/hadoop/hdfs/namenode'
+    else:
+        current_hdfs_site_properties = ambari_get_current_config(ambari,
+                                                                 DEFAULT_CLUSTER_NAME, 'hdfs-site')['properties']
+        hdfs_data_dir_items = current_hdfs_site_properties.get('dfs.datanode.data.dir', '')
+        if '/run/hadoop/hdfs/data' not in hdfs_data_dir_items.split(','):
+            hdfs_data_dir_items = ','.join(hdfs_data_dir_items.split(',') + ['/run/hadoop/hdfs/data'])
+        hdfs_name_dir_items = current_hdfs_site_properties.get('dfs.namenode.name.dir', '')
+        if '/run/hadoop/hdfs/namenode' not in hdfs_name_dir_items.split(','):
+            hdfs_name_dir_items = ','.join(hdfs_name_dir_items.split(',') + ['/run/hadoop/hdfs/namenode'])
+    hdfs_site_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('hdfs-site').items
+    hdfs_site_items.create(properties_to_update={
+        'dfs.datanode.data.dir': hdfs_data_dir_items,
+        'dfs.datanode.max.transfer.threads': 16384,
+        'dfs.namenode.handler.count': 200,
+        'dfs.namenode.name.dir': hdfs_name_dir_items,
+        'dfs.namenode.safemode.threshold-pct': 1})
+    # Doesnt work - delete not available in ambari client - can ignore for now, TODO
+    # hdfs_site_items.delete(properties=['dfs.encryption.key.provider.uri'])
+
+    yarn_env_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('yarn-env').items
+    if stack_version_tuple < (3, 0):
+        yarn_env_items.create(properties_to_update={'min_user_id': 500})
+    else:
+        yarn_env_items.create(properties_to_update={'min_user_id': 1000})
+
+    yarn_site_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('yarn-site').items
+    if stack_version_tuple < (3, 0):
+        yarn_site_items.create(properties_to_update={
+            'hadoop.registry.rm.enabled': True,
+            'yarn.nodemanager.local-dirs': '/hadoop/yarn/local,/run/hadoop/yarn/local,/run/lock/hadoop/yarn/local',
+            'yarn.nodemanager.log-dirs': '/hadoop/yarn/log,/run/hadoop/yarn/log,/run/lock/hadoop/yarn/log',
+            'yarn.resourcemanager.monitor.capacity.preemption.total_preemption_per_round': 0.5,
+            'yarn.timeline-service.entity-group-fs-store.group-id-plugin-classes': (
+                'org.apache.tez.dag.history.logging.ats.TimelineCachePluginImpl,'
+                'org.apache.spark.deploy.history.yarn.plugin.SparkATSPlugin'),
+            'yarn.timeline-service.entity-group-fs-store.group-id-plugin-classpath': (
+                '/usr/hdp/{{spark_version}}/spark/hdpLib/*'),
+            'yarn.timeline-service.http-authentication.proxyuser.root.groups': '*',
+            'yarn.timeline-service.http-authentication.proxyuser.root.hosts': atlas_server_host})
+    else:
+        current_yarn_site_properties = ambari_get_current_config(ambari,
+                                                                 DEFAULT_CLUSTER_NAME, 'yarn-site')['properties']
+        yarn_local_dir_items = current_yarn_site_properties.get('yarn.nodemanager.local-dirs', '')
+        if '/run/hadoop/yarn/local' not in yarn_local_dir_items.split(','):
+            yarn_local_dir_items = ','.join(yarn_local_dir_items.split(',') + ['/run/hadoop/yarn/local'])
+        yarn_log_dir_items = current_yarn_site_properties.get('yarn.nodemanager.local-dirs', '')
+        if '/run/hadoop/yarn/log' not in yarn_log_dir_items.split(','):
+            yarn_log_dir_items = ','.join(yarn_log_dir_items.split(',') + ['/run/hadoop/yarn/log'])
+        yarn_site_items.create(properties_to_update={
+            'yarn.nodemanager.local-dirs': yarn_local_dir_items,
+            'yarn.nodemanager.log-dirs': yarn_log_dir_items,
+            'yarn.resourcemanager.monitor.capacity.preemption.total_preemption_per_round': 0.5,
+            'yarn.timeline-service.http-authentication.proxyuser.root.groups': '*',
+            'yarn.timeline-service.http-authentication.proxyuser.root.hosts': atlas_server_host})
+
+    tez_site_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('tez-site').items
+    tez_site_items.create(properties_to_update={
+        'tez.am.java.opts': '-server -Djava.net.preferIPv4Stack=true',
+        'tez.history.logging.proto-base-dir': '/warehouse/tablespace/external/hive/sys.db',
+        'tez.history.logging.service.class': 'org.apache.tez.dag.history.logging.proto.ProtoHistoryLoggingService',
+        'tez.queue.name': 'default',
+        'tez.session.am.dag.submit.timeout.secs': 600})
+
+    hive_env_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('hive-env').items
+    hive_env_items.create(properties_to_update={'hive.atlas.hook': True})
+
+    hive_site_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('hive-site').items
+    if stack_version_tuple < (3, 0):
+        hive_site_items.create(properties_to_update={
+            'hive.exec.post.hooks': ('org.apache.hadoop.hive.ql.hooks.ATSHook,'
+                                     'org.apache.atlas.hive.hook.HiveHook'),
+            'atlas.rest.address': 'http://{}:{}'.format(atlas_server_host, DEFAULT_ATLAS_REST_PORT)})
+    else:
+        hive_site_items.create(properties_to_update={
+            'hive.compactor.worker.threads': 1,
+            'hive.exec.post.hooks': ('org.apache.hadoop.hive.ql.hooks.HiveProtoLoggingHook,'
+                                     'org.apache.atlas.hive.hook.HiveHook'),
+            'atlas.rest.address': 'http://{}:{}'.format(atlas_server_host, DEFAULT_ATLAS_REST_PORT)})
+
+    hive_interactive_site_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('hive-interactive-site').items
+    hive_interactive_site_props = ambari_get_current_config(ambari, DEFAULT_CLUSTER_NAME, 'hive-site')['properties']
+    hive_interactive_site_items.create(properties_to_update={
+        'hive.metastore.uris': hive_interactive_site_props['hive.metastore.uris']})
+
+    if stack_version_tuple >= (3, 0):
+        hbase_env_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('hbase-env').items
+        hbase_env_items.create(properties_to_update={'hbase.atlas.hook': True})
+        # Doesnt work - delete not available in ambari client - can ignore for now, TODO
+        # hbase_env_items.delete(properties=['hbase_max_direct_memory_size'])
+
+        hbase_site_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('hbase-site').items
+        hbase_site_items.create(properties_to_update={
+            'hbase.coprocessor.master.classes': 'org.apache.atlas.hbase.hook.HBaseAtlasCoprocessor',
+            'hbase.regionserver.handler.count': 70,
+            'hbase.regionserver.thread.compaction.small': 3,
+            'phoenix.rpc.index.handler.count': 20})
+        # Doesnt work - delete not available in ambari client - can ignore for now, TODO
+        # hbase_site_items.delete(properties=['hbase.bucketcache.ioengine', 'hbase.bucketcache.percentage.in.combinedcache', 'hbase.bucketcache.size'])
+
+    kafka_broker_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('kafka-broker').items
+    kafka_broker_items.create(properties_to_update={
+        'log.dirs': '/kafka-logs /kafka-logs,/run/kafka-logs',
+        'offsets.topic.replication.factor': 1})
+
+    current_mapred_site_properties = ambari_get_current_config(ambari, DEFAULT_CLUSTER_NAME, 'mapred-site')['properties']
+    mapred_local_dir_items = current_mapred_site_properties.get('mapred.local.dir', '')
+    if '/hadoop/mapred' not in mapred_local_dir_items.split(','):
+        mapred_local_dir_items = ','.join(mapred_local_dir_items.split(',') + ['/hadoop/mapred'])
+    if '/run/hadoop/mapred' not in mapred_local_dir_items.split(','):
+        mapred_local_dir_items = ','.join(mapred_local_dir_items.split(',') + ['/run/hadoop/mapred'])
+    mapred_site_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('mapred-site').items
+    mapred_site_items.create(properties_to_update={'mapred.local.dir': mapred_local_dir_items})
+
+    if stack_version_tuple < (3, 0):
+        webhcat_site_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('webhcat-site').items
+        webhcat_site_items.create(properties_to_update={
+            'webhcat.proxyuser.root.groups': '*',
+            'webhcat.proxyuser.root.hosts': atlas_server_host})
+
+    zookeeper_connect_port = int(ambari_get_current_config(ambari, DEFAULT_CLUSTER_NAME, 'zoo.cfg')
+                                 ['properties']['clientPort'])
+    kafka_broker_port = int(ambari_get_current_config(ambari, DEFAULT_CLUSTER_NAME, 'kafka-broker')
+                            ['properties']['port'])
+    application_properties_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('application-properties').items
+    application_properties_items.create(properties_to_update={
+        'atlas.audit.hbase.zookeeper.quorum': atlas_server_host,
+        'atlas.authorizer.impl': 'simple',
+        'atlas.graph.index.search.solr.zookeeper-url': '{}:{}/infra-solr'.format(atlas_server_host,
+                                                                                 zookeeper_connect_port),
+        'atlas.graph.storage.hostname': atlas_server_host,
+        'atlas.kafka.bootstrap.servers': '{}:{}'.format(atlas_server_host, kafka_broker_port),
+        'atlas.kafka.zookeeper.connect': '{}:{}'.format(atlas_server_host, zookeeper_connect_port),
+        'atlas.rest.address': 'http://{}:{}'.format(atlas_server_host, DEFAULT_ATLAS_REST_PORT)})
+
+
+def ambari_get_current_config(ambari, cluster_name, config_type):
+    items = ambari.clusters(cluster_name).configurations(config_type).items
+    current_tag = items.parent.cluster.desired_configs[items.parent.type]['tag']
+    items.inflate()
+    current_item = {}
+    for model in items._models:
+        if model.tag == current_tag:
+            current_item = (model.items[0] if (model.items and len(model.items) > 0) else {})
+            break
+    return current_item
