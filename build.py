@@ -11,19 +11,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# useful build commands:
+#   clusterdock build topology_hdp --operating-system centos6.8 --ambari-version 2.6.1.0 --hdp-version 2.6.4.0 --retain
+#   clusterdock build topology_hdp --operating-system centos7.4 --ambari-version 2.7.3.0 --hdp-version 3.1.0.0 --retain
+
+import json
 import logging
 import re
 import socket
 import time
 
+import requests
 from ambariclient.client import Ambari
 
 import clusterdock.models as models
 from clusterdock.config import defaults
-from clusterdock.utils import print_topology_meta, version_tuple, wait_for_condition
+from clusterdock.utils import join_url_parts, print_topology_meta, version_tuple, wait_for_condition
 
 logger = logging.getLogger('clusterdock.{}'.format(__name__))
 
+DEFAULT_AMBARI_PASSWORD = 'admin'
+DEFAULT_AMBARI_USERNAME = 'admin'
 DEFAULT_OPERATING_SYSTEM = 'centos7.4'
 
 AMBARI_AGENT_CONFIG_FILE_PATH = '/etc/ambari-agent/conf/ambari-agent.ini'
@@ -54,10 +62,33 @@ EXTRA_HOST_GROUPS_2_4_0_0 = [
                     {'name': 'KAFKA_BROKER'}, {'name': 'SLIDER'}, {'name': 'SPARK_CLIENT'},
                     {'name': 'MYSQL_SERVER'}, {'name': 'PIG'}, {'name': 'AMBARI_SERVER'},
                     {'name': 'HBASE_CLIENT'}, {'name': 'SPARK_JOBHISTORYSERVER'},
-                    {'name': 'HIVE_CLIENT'}]},
+                    {'name': 'HIVE_CLIENT'},
+                    {'name': 'ATLAS_SERVER'},  {'name': 'ATLAS_CLIENT'},
+                    {'name': 'INFRA_SOLR'},  {'name': 'INFRA_SOLR_CLIENT'}]},
     {'components': [{'name': 'SPARK_CLIENT'}, {'name': 'TEZ_CLIENT'}, {'name': 'HCAT'},
                     {'name': 'PIG'}, {'name': 'SLIDER'}, {'name': 'HBASE_REGIONSERVER'},
-                    {'name': 'HBASE_CLIENT'}, {'name': 'HIVE_CLIENT'}]}]
+                    {'name': 'HBASE_CLIENT'}, {'name': 'HIVE_CLIENT'},
+                    {'name': 'ATLAS_CLIENT'},
+                    {'name': 'INFRA_SOLR_CLIENT'}]}]
+
+EXTRA_HOST_GROUPS_2_6_4_0 = [
+    {'components': [{'name': 'HIVE_SERVER'}, {'name': 'SPARK_CLIENT'}, {'name': 'SPARK2_CLIENT'},
+                    {'name': 'HBASE_MASTER'},
+                    {'name': 'HIVE_METASTORE'}, {'name': 'TEZ_CLIENT'},
+                    {'name': 'WEBHCAT_SERVER'}, {'name': 'HCAT'}, {'name': 'SLIDER'},
+                    {'name': 'SPARK_JOBHISTORYSERVER'}, {'name': 'SPARK2_JOBHISTORYSERVER'},
+                    {'name': 'KAFKA_BROKER'},
+                    {'name': 'MYSQL_SERVER'}, {'name': 'PIG'}, {'name': 'AMBARI_SERVER'},
+                    {'name': 'HBASE_CLIENT'},
+                    {'name': 'HIVE_CLIENT'},
+                    {'name': 'ATLAS_SERVER'},  {'name': 'ATLAS_CLIENT'},
+                    {'name': 'INFRA_SOLR'},  {'name': 'INFRA_SOLR_CLIENT'}]},
+    {'components': [{'name': 'SPARK_CLIENT'}, {'name': 'SPARK2_CLIENT'}, {'name': 'TEZ_CLIENT'},
+                    {'name': 'PIG'}, {'name': 'HCAT'},
+                    {'name': 'HBASE_REGIONSERVER'}, {'name': 'HBASE_CLIENT'},
+                    {'name': 'HIVE_CLIENT'}, {'name': 'SLIDER'},
+                    {'name': 'ATLAS_CLIENT'},
+                    {'name': 'INFRA_SOLR_CLIENT'}]}]
 
 EXTRA_HOST_GROUPS_3_1_0_0 = [
     {'components': [{'name': 'HIVE_SERVER'}, {'name': 'SPARK2_CLIENT'}, {'name': 'HBASE_MASTER'},
@@ -66,11 +97,15 @@ EXTRA_HOST_GROUPS_3_1_0_0 = [
                     {'name': 'KAFKA_BROKER'},
                     {'name': 'MYSQL_SERVER'}, {'name': 'PIG'}, {'name': 'AMBARI_SERVER'},
                     {'name': 'HBASE_CLIENT'},
-                    {'name': 'HIVE_CLIENT'}]},
+                    {'name': 'HIVE_CLIENT'},
+                    {'name': 'ATLAS_SERVER'},  {'name': 'ATLAS_CLIENT'},
+                    {'name': 'INFRA_SOLR'},  {'name': 'INFRA_SOLR_CLIENT'}]},
     {'components': [{'name': 'SPARK2_CLIENT'}, {'name': 'TEZ_CLIENT'},
                     {'name': 'PIG'},
                     {'name': 'HBASE_REGIONSERVER'}, {'name': 'HBASE_CLIENT'},
-                    {'name': 'HIVE_CLIENT'}]}]
+                    {'name': 'HIVE_CLIENT'},
+                    {'name': 'ATLAS_CLIENT'},
+                    {'name': 'INFRA_SOLR_CLIENT'}]}]
 
 DEFAULT_EXTRA_HOST_GROUPS = [
     {'components': [{'name': 'HIVE_SERVER'}, {'name': 'SPARK2_CLIENT'}, {'name': 'HBASE_MASTER'},
@@ -79,11 +114,15 @@ DEFAULT_EXTRA_HOST_GROUPS = [
                     {'name': 'KAFKA_BROKER'}, {'name': 'SLIDER'}, {'name': 'SPARK_CLIENT'},
                     {'name': 'MYSQL_SERVER'}, {'name': 'PIG'}, {'name': 'AMBARI_SERVER'},
                     {'name': 'HBASE_CLIENT'}, {'name': 'SPARK_JOBHISTORYSERVER'},
-                    {'name': 'HIVE_CLIENT'}]},
+                    {'name': 'HIVE_CLIENT'},
+                    {'name': 'ATLAS_SERVER'},  {'name': 'ATLAS_CLIENT'},
+                    {'name': 'INFRA_SOLR'},  {'name': 'INFRA_SOLR_CLIENT'}]},
     {'components': [{'name': 'SPARK_CLIENT'}, {'name': 'SPARK2_CLIENT'}, {'name': 'TEZ_CLIENT'},
                     {'name': 'HCAT'}, {'name': 'PIG'}, {'name': 'SLIDER'},
                     {'name': 'HBASE_REGIONSERVER'}, {'name': 'HBASE_CLIENT'},
-                    {'name': 'HIVE_CLIENT'}]}]
+                    {'name': 'HIVE_CLIENT'},
+                    {'name': 'ATLAS_CLIENT'},
+                    {'name': 'INFRA_SOLR_CLIENT'}]}]
 
 DEFAULT_CLUSTER_HOST_MAPPING = [{'name': 'primary', 'hosts': [{'fqdn': None}]},
                                 {'name': 'secondary', 'hosts': [{'fqdn': None}]}]
@@ -109,6 +148,7 @@ def main(args):
 
     hdp_version_tuple = version_tuple(args.hdp_version)
     stack_version = '{}.{}'.format(hdp_version_tuple[0], hdp_version_tuple[1])
+    stack_version_tuple = (hdp_version_tuple[0], hdp_version_tuple[1])
     DEFAULT_CLUSTER_HOST_MAPPING[0]['hosts'][0]['fqdn'] = primary_node.fqdn
     DEFAULT_CLUSTER_HOST_MAPPING[1]['hosts'][0]['fqdn'] = secondary_node.fqdn
 
@@ -120,6 +160,9 @@ def main(args):
         elif hdp_version_tuple <= (2, 4, 0, 0):
             host_groups[0]['components'].extend(EXTRA_HOST_GROUPS_2_4_0_0[0]['components'])
             host_groups[1]['components'].extend(EXTRA_HOST_GROUPS_2_4_0_0[1]['components'])
+        elif hdp_version_tuple <= (2, 6, 4, 0):
+            host_groups[0]['components'].extend(EXTRA_HOST_GROUPS_2_6_4_0[0]['components'])
+            host_groups[1]['components'].extend(EXTRA_HOST_GROUPS_2_6_4_0[1]['components'])
         elif hdp_version_tuple <= (3, 1, 0, 0):
             host_groups[0]['components'].extend(EXTRA_HOST_GROUPS_3_1_0_0[0]['components'])
             host_groups[1]['components'].extend(EXTRA_HOST_GROUPS_3_1_0_0[1]['components'])
@@ -175,7 +218,7 @@ def main(args):
     server_url = 'http://{}:{}'.format(hostname, port)
     logger.info('Ambari server is now reachable at %s', server_url)
 
-    ambari = Ambari(server_url, username='admin', password='admin')
+    ambari = Ambari(server_url, username=DEFAULT_AMBARI_USERNAME, password=DEFAULT_AMBARI_PASSWORD)
 
     logger.info('Waiting for all hosts to be visible in Ambari ...')
     def condition(ambari, cluster):
@@ -185,18 +228,51 @@ def main(args):
         return cluster_hosts == ambari_hosts
     wait_for_condition(condition=condition, condition_args=[ambari, cluster])
 
+    logger.info('Updating install repo to use %s HDP version ...', args.hdp_version)
+    # based off of release notes of https://bit.ly/2R06NKp
+    if stack_version_tuple >= (2, 6):
+        url = join_url_parts(hdp_repo_url, 'build.id')
+        response = requests.get(url)
+        response.raise_for_status()
+        build_number = next((int(item.split(':')[1].strip()) for item in response.text.split('\n')
+                             if 'BUILD_NUMBER' in item), None)
+        if not build_number:
+            raise Exception('Could not determine build number as required for repo setting. Build data found: ',
+                            response.text)
+
+        # version_definitions not yet supported by Ambari client library - a TODO
+        hdp_repo_version = '{}-{}'.format(args.hdp_version, build_number)
+        version_definition = {
+            'VersionDefinition': {
+                'version_url': '{}/HDP-{}.xml'.format(hdp_repo_url, hdp_repo_version)
+            }
+        }
+        url = join_url_parts(server_url, 'api', 'v1', 'version_definitions')
+        data = json.dumps(version_definition)
+        response = requests.post(url, data=data, auth=(DEFAULT_AMBARI_USERNAME, DEFAULT_AMBARI_PASSWORD),
+                                 headers={'X-Requested-By': 'topology_hdp build'})
+        response.raise_for_status()
+    else:
+        hdp_os = ambari.stacks('HDP').versions(stack_version).operating_systems('redhat6')
+        hdp_os.repositories('HDP-{}'.format(stack_version)).update(base_url=hdp_repo_url, verify_base_url=False)
+        hdp_repo_version = None
+        build_number = None
+
     logger.info('Creating `cluster` with pre-defined components ...')
     ambari.blueprints('cluster').create(blueprint_name='cluster', stack_version=stack_version,
                                         stack_name='HDP', host_groups=host_groups)
-    hdp_os = ambari.stacks('HDP').versions(stack_version).operating_systems('redhat6')
-    hdp_os.repositories('HDP-{}'.format(stack_version)).update(base_url=hdp_repo_url,
-                                                               verify_base_url=False)
+
     logger.info('Installing cluster components ...')
     hdp_cluster = ambari.clusters('cluster')
     # INSTALL_ONLY option not applicable for <= 2.0.13.0 ver, it will be install and start services.
     if hdp_version_tuple <= (2, 0, 13, 0):
         hdp_cluster = hdp_cluster.create(blueprint='cluster', default_password='hadoop',
                                          host_groups=DEFAULT_CLUSTER_HOST_MAPPING)
+    elif hdp_repo_version:
+        hdp_cluster = hdp_cluster.create(blueprint='cluster', default_password='hadoop',
+                                         repository_version=hdp_repo_version,
+                                         host_groups=DEFAULT_CLUSTER_HOST_MAPPING,
+                                         provision_action='INSTALL_ONLY')
     else:
         hdp_cluster = hdp_cluster.create(blueprint='cluster', default_password='hadoop',
                                          host_groups=DEFAULT_CLUSTER_HOST_MAPPING,
@@ -228,7 +304,7 @@ def main(args):
         logger.info('Ambari task queued to stop services ...')
         hdp_cluster.cluster.services.stop().wait()
 
-    logger.info('Stopping Ambari ...')
+    logger.info('Stopping Ambari for saving to Docker image ...')
     for node in cluster:
         node.execute('ambari-agent stop', quiet=quiet)
 
@@ -251,7 +327,13 @@ def main(args):
                 ('and pushing its image to {} ...'.format(repository) if args.push else '...'))
     secondary_node.commit(repository=repository, tag=secondary_node_tag, push=args.push)
 
-    if not args.retain:
+    if args.retain:
+        logger.info('Starting Ambari ...')
+        primary_node.execute('service postgresql start', quiet=quiet)
+        primary_node.execute('ambari-server start', quiet=quiet)
+        for node in cluster:
+            node.execute('ambari-agent start', quiet=quiet)
+    else:
         logger.info('Removing the containers ...')
         primary_node.stop()
         secondary_node.stop()
