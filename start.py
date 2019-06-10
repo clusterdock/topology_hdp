@@ -277,11 +277,11 @@ def _remove_files(nodes, files, quiet):
 
 
 def _install_atlas_streamsets_model(node, custom_stage_lib, quiet):
+    # StreamSets Atlas model files are embedded inside Atlas stage lib's protolib jar. We will extract the files
+    # from the protolib and deploy the model files to Atlas server (before its service start).
+    # To extract the files, we create a temporary stage lib container and tarstream the protolib jar.
     logger.debug('Installing StreamSets Atlas model ...')
     atlas_custom_stage_lib_name, atlas_custom_stage_lib_version = custom_stage_lib.split(',')
-    atlas_custom_stage_lib_version = ('{}-SNAPSHOT'.format(atlas_custom_stage_lib_version.rsplit('-latest', 1)[0])
-                                      if atlas_custom_stage_lib_version.endswith('-latest')
-                                      else atlas_custom_stage_lib_version)
     image_name = ATLAS_STAGE_IMAGE_NAME_TEMPLATE.format(atlas_custom_stage_lib_name, atlas_custom_stage_lib_version)
     try:
         docker_client.api.inspect_image(image_name)
@@ -289,13 +289,13 @@ def _install_atlas_streamsets_model(node, custom_stage_lib, quiet):
         if (not_found.response.status_code == 404 and 'No such image' in not_found.explanation):
             docker_client.images.pull(image_name)
 
-    file_path = ('/opt/streamsets-datacollector-user-libs/streamsets-datacollector-{}-lib/lib/'
-                 'streamsets-datacollector-apache-atlas-protolib-{}.jar'.format(atlas_custom_stage_lib_name,
-                                                                                atlas_custom_stage_lib_version))
     container_id = docker_client.api.create_container(image=image_name)['Id']
     try:
         container = docker_client.containers.get(container_id=container_id)
-
+        stage_lib_version = container.labels.get('STAGE_LIB_VERSION', atlas_custom_stage_lib_version)
+        file_path = ('/opt/streamsets-datacollector-user-libs/streamsets-datacollector-{}-lib/lib/'
+                     'streamsets-datacollector-apache-atlas-protolib-{}.jar'.format(atlas_custom_stage_lib_name,
+                                                                                    stage_lib_version))
         tarstream = io.BytesIO()
         for chunk in container.get_archive(path=file_path)[0]:
             tarstream.write(chunk)
@@ -304,18 +304,19 @@ def _install_atlas_streamsets_model(node, custom_stage_lib, quiet):
         zfile = zipfile.ZipFile(tarstream)
         for info in zfile.infolist():
             filename = info.filename
+            # stage lib Atlas model file end with 'streamsets_model.json' as in '0090-streamsets_model.json'
             if 'streamsets_model.json' in filename:
                 logger.debug('StreamSets Atlas model filename determined as %s', filename)
                 data = zfile.read(filename).decode()
-                file_path = '/usr/hdp/current/atlas-server/models/{}'.format(filename)
-                node.put_file(file_path, data)
-                node.execute('chown atlas:hadoop {}'.format(file_path), quiet=quiet)
+                node_file_path = '/usr/hdp/current/atlas-server/models/{}'.format(filename)
+                node.put_file(node_file_path, data)
+                node.execute('chown atlas:hadoop {}'.format(node_file_path), quiet=quiet)
     finally:
         docker_client.api.remove_container(container=container_id, v=True, force=True)
 
 
 def _configure_atlas(ambari, hdp_version, atlas_server_host):
-    logger.debug('Configuring Atlas and its depended service properties ...')
+    logger.debug('Configuring Atlas and its dependent service properties ...')
     hdp_version_tuple = version_tuple(hdp_version)
     stack_version = '{}.{}'.format(hdp_version_tuple[0], hdp_version_tuple[1])
     stack_version_tuple = (hdp_version_tuple[0], hdp_version_tuple[1])
