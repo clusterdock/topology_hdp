@@ -16,6 +16,7 @@
 
 import json
 import logging
+import os
 import re
 import socket
 import textwrap
@@ -28,6 +29,10 @@ from clusterdock.utils import print_topology_meta, version_tuple, wait_for_condi
 
 logger = logging.getLogger('clusterdock.{}'.format(__name__))
 
+# Files placed in this directory on primary_node are available
+# in clusterdock_config_directory after cluster is started.
+# Also, this gets volume mounted to all secondary nodes and hence available there too.
+CLUSTERDOCK_CLIENT_CONTAINER_DIR = '/etc/clusterdock/client'
 DEFAULT_NAMESPACE = 'clusterdock'
 
 AMBARI_AGENT_CONFIG_FILE_PATH = '/etc/ambari-agent/conf/ambari-agent.ini'
@@ -53,12 +58,15 @@ def main(args):
     primary_node_image = '{}_{}'.format(image_prefix, 'primary-node')
     secondary_node_image = '{}_{}'.format(image_prefix, 'secondary-node')
 
-    primary_node = Node(hostname=args.primary_node[0], group='primary',
+    clusterdock_config_host_dir = os.path.realpath(os.path.expanduser(args.clusterdock_config_directory))
+    volumes = [{clusterdock_config_host_dir: CLUSTERDOCK_CLIENT_CONTAINER_DIR}]
+
+    primary_node = Node(hostname=args.primary_node[0], group='primary', volumes=volumes,
                         image=primary_node_image, ports=[{AMBARI_PORT: AMBARI_PORT}
                                                          if args.predictable
                                                          else AMBARI_PORT])
 
-    secondary_nodes = [Node(hostname=hostname, group='secondary', image=secondary_node_image)
+    secondary_nodes = [Node(hostname=hostname, group='secondary', volumes=volumes, image=secondary_node_image)
                        for hostname in args.secondary_nodes]
 
     cluster = Cluster(primary_node, *secondary_nodes)
