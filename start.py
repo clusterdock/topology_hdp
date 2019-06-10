@@ -11,9 +11,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Ambari logon credentials: admin / admin
-# Atlas logon credentials: admin / hadoop (3.X versions) and admin / admin (2.X versions)
+# Passwords:
+#   Ambari logon credentials: admin / admin
+#   Atlas logon credentials: admin / admin
 
+import io
 import json
 import logging
 import os
@@ -21,7 +23,9 @@ import re
 import socket
 import textwrap
 import time
+import zipfile
 
+import docker
 from ambariclient.client import Ambari
 
 from clusterdock.models import Cluster, client, Node
@@ -35,6 +39,7 @@ logger = logging.getLogger('clusterdock.{}'.format(__name__))
 CLUSTERDOCK_CLIENT_CONTAINER_DIR = '/etc/clusterdock/client'
 DEFAULT_NAMESPACE = 'clusterdock'
 
+ATLAS_STAGE_IMAGE_NAME_TEMPLATE = 'streamsets/additional-datacollector-libs:streamsets-datacollector-{}-lib-{}'
 AMBARI_AGENT_CONFIG_FILE_PATH = '/etc/ambari-agent/conf/ambari-agent.ini'
 AMBARI_PORT = 8080
 HBASE_THRIFT_SERVER_PORT = 9090
@@ -42,6 +47,8 @@ HBASE_THRIFT_SERVER_INFO_PORT = 9095
 
 DEFAULT_ATLAS_REST_PORT = 21000
 DEFAULT_CLUSTER_NAME = 'cluster'
+
+docker_client = docker.from_env()
 
 
 def main(args):
@@ -168,8 +175,18 @@ def main(args):
                      ambari.clusters(DEFAULT_CLUSTER_NAME).services.to_dict()]
 
     if 'ATLAS' in service_names:
-        logger.info('Configuring Atlas required properties ...')
+        logger.info('Configuring Atlas ...')
+        if args.atlas_custom_stage_lib:
+            _install_atlas_streamsets_model(cluster.primary_node, args.atlas_custom_stage_lib, quiet)
+
         _configure_atlas(ambari, args.hdp_version, atlas_server_host=cluster.primary_node.fqdn)
+
+        logger.debug('Extracting `atlas-application.properties` file to %s ...', clusterdock_config_host_dir)
+        atlas_tarfile = ambari.clusters(DEFAULT_CLUSTER_NAME).services('ATLAS').components.get_client_config_tar()
+        tar_member = next(member for member in atlas_tarfile.getmembers() if 'application.properties' in member.name)
+        atlas_property_data = atlas_tarfile.extractfile(tar_member).read().decode()
+        with open(os.path.join(clusterdock_config_host_dir, 'atlas-application.properties'), 'w') as _file:
+            _file.write(atlas_property_data)
 
     if 'HDFS' in service_names:
         logger.info('Adding `sdc` HDFS proxy user ...')
@@ -259,7 +276,46 @@ def _remove_files(nodes, files, quiet):
         node.execute(command=command, quiet=quiet)
 
 
+def _install_atlas_streamsets_model(node, custom_stage_lib, quiet):
+    logger.debug('Installing StreamSets Atlas model ...')
+    atlas_custom_stage_lib_name, atlas_custom_stage_lib_version = custom_stage_lib.split(',')
+    atlas_custom_stage_lib_version = ('{}-SNAPSHOT'.format(atlas_custom_stage_lib_version.rsplit('-latest', 1)[0])
+                                      if atlas_custom_stage_lib_version.endswith('-latest')
+                                      else atlas_custom_stage_lib_version)
+    image_name = ATLAS_STAGE_IMAGE_NAME_TEMPLATE.format(atlas_custom_stage_lib_name, atlas_custom_stage_lib_version)
+    try:
+        docker_client.api.inspect_image(image_name)
+    except docker.errors.NotFound as not_found:
+        if (not_found.response.status_code == 404 and 'No such image' in not_found.explanation):
+            docker_client.images.pull(image_name)
+
+    file_path = ('/opt/streamsets-datacollector-user-libs/streamsets-datacollector-{}-lib/lib/'
+                 'streamsets-datacollector-apache-atlas-protolib-{}.jar'.format(atlas_custom_stage_lib_name,
+                                                                                atlas_custom_stage_lib_version))
+    container_id = docker_client.api.create_container(image=image_name)['Id']
+    try:
+        container = docker_client.containers.get(container_id=container_id)
+
+        tarstream = io.BytesIO()
+        for chunk in container.get_archive(path=file_path)[0]:
+            tarstream.write(chunk)
+        tarstream.seek(0)
+
+        zfile = zipfile.ZipFile(tarstream)
+        for info in zfile.infolist():
+            filename = info.filename
+            if 'streamsets_model.json' in filename:
+                logger.debug('StreamSets Atlas model filename determined as %s', filename)
+                data = zfile.read(filename).decode()
+                file_path = '/usr/hdp/current/atlas-server/models/{}'.format(filename)
+                node.put_file(file_path, data)
+                node.execute('chown atlas:hadoop {}'.format(file_path), quiet=quiet)
+    finally:
+        docker_client.api.remove_container(container=container_id, v=True, force=True)
+
+
 def _configure_atlas(ambari, hdp_version, atlas_server_host):
+    logger.debug('Configuring Atlas and its depended service properties ...')
     hdp_version_tuple = version_tuple(hdp_version)
     stack_version = '{}.{}'.format(hdp_version_tuple[0], hdp_version_tuple[1])
     stack_version_tuple = (hdp_version_tuple[0], hdp_version_tuple[1])
@@ -397,6 +453,11 @@ def _configure_atlas(ambari, hdp_version, atlas_server_host):
         webhcat_site_items.create(properties_to_update={
             'webhcat.proxyuser.root.groups': '*',
             'webhcat.proxyuser.root.hosts': atlas_server_host})
+
+    atlas_env_items = ambari.clusters(DEFAULT_CLUSTER_NAME).configurations('atlas-env').items
+    atlas_env_items.create(properties_to_update={
+        'atlas.admin.password': 'admin',
+        'atlas.admin.username': 'admin'})
 
     zookeeper_connect_port = int(ambari_get_current_config(ambari, DEFAULT_CLUSTER_NAME, 'zoo.cfg')
                                  ['properties']['clientPort'])

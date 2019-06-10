@@ -40,6 +40,9 @@ build args:
         help: If specified, will retain (not remove) the built Docker containers
 
 start args:
+    --atlas-custom-stage-lib:
+        help: If specified, custom stage lib name-version for Atlas, used for example, deploying StreamSets
+            data model to Atlas. Some examples, apache-atlas_1_1_0,1.6.0-SNAPSHOT or apache-atlas_0_8_1,1.6.0-latest
     --hdp-version:
         default: 2.6.4.0
         help: HDP version to use

@@ -15,6 +15,10 @@
 #   clusterdock build topology_hdp --operating-system centos6.8 --ambari-version 2.6.1.0 --hdp-version 2.6.4.0 --retain
 #   clusterdock build topology_hdp --operating-system centos7.4 --ambari-version 2.7.3.0 --hdp-version 3.1.0.0 --retain
 
+# Default passwords:
+#   Ambari logon credentials: admin / admin
+#   Atlas logon credentials: admin / hadoop (3.X versions) and admin / admin (2.X versions)
+
 import json
 import logging
 import re
