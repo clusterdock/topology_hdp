@@ -13,6 +13,7 @@
 
 # Ambari logon credentials: admin / admin
 # Atlas logon credentials: admin / hadoop (3.X versions) and admin / admin (2.X versions)
+# Kerberos is setup to work for >= 3.X versions only
 
 import json
 import logging
@@ -23,11 +24,10 @@ import textwrap
 import time
 
 from ambariclient.client import Ambari
+from ambariclient.models import Request
 
 from clusterdock.models import Cluster, client, Node
-from clusterdock.utils import print_topology_meta, version_tuple, wait_for_condition
-
-logger = logging.getLogger('clusterdock.{}'.format(__name__))
+from clusterdock.utils import join_url_parts, print_topology_meta, version_tuple, wait_for_condition
 
 # Files placed in this directory on primary_node are available
 # in clusterdock_config_directory after cluster is started.
@@ -43,6 +43,19 @@ HBASE_THRIFT_SERVER_INFO_PORT = 9095
 DEFAULT_ATLAS_REST_PORT = 21000
 DEFAULT_CLUSTER_NAME = 'cluster'
 
+KERBEROS_CONFIG_CONTAINER_DIR = '/etc/clusterdock/client/kerberos'
+KERBEROS_USER_PRINCIPAL_PASSWORD = 'acladmin'
+KERBEROS_USER_PRINCIPAL_PREFIX = 'admin/admin'
+KDC_HOSTNAME = 'kdc'
+KDC_IMAGE = 'clusterdock/topology_nodebase_kerberos:centos6.6'
+KDC_ACL_FILENAME = '/var/kerberos/krb5kdc/kadm5.acl'
+KDC_CONF_FILENAME = '/var/kerberos/krb5kdc/kdc.conf'
+KDC_KEYTAB_FILENAME = '{}/clusterdock.keytab'.format(KERBEROS_CONFIG_CONTAINER_DIR)
+KDC_KRB5_CONF_FILENAME = '/etc/krb5.conf'
+LINUX_USER_ID_START = 1000
+
+logger = logging.getLogger('clusterdock.{}'.format(__name__))
+
 
 def main(args):
     quiet = not args.verbose
@@ -51,37 +64,49 @@ def main(args):
     if args.include_services and args.exclude_services:
             raise ValueError('Cannot pass both --include-services and --exclude-services.')
 
+    clusterdock_config_host_dir = os.path.realpath(os.path.expanduser(args.clusterdock_config_directory))
+    hdp_version_tuple = version_tuple(args.hdp_version)
     image_prefix = '{}/{}/topology_hdp:hdp{}_ambari{}'.format(args.registry,
                                                               args.namespace or DEFAULT_NAMESPACE,
                                                               args.hdp_version,
                                                               args.ambari_version)
     primary_node_image = '{}_{}'.format(image_prefix, 'primary-node')
     secondary_node_image = '{}_{}'.format(image_prefix, 'secondary-node')
-
-    clusterdock_config_host_dir = os.path.realpath(os.path.expanduser(args.clusterdock_config_directory))
+    ports = [{AMBARI_PORT: AMBARI_PORT} if args.predictable else AMBARI_PORT]
     volumes = [{clusterdock_config_host_dir: CLUSTERDOCK_CLIENT_CONTAINER_DIR}]
 
     primary_node = Node(hostname=args.primary_node[0], group='primary', volumes=volumes,
-                        image=primary_node_image, ports=[{AMBARI_PORT: AMBARI_PORT}
-                                                         if args.predictable
-                                                         else AMBARI_PORT])
-
+                        image=primary_node_image, ports=ports)
     secondary_nodes = [Node(hostname=hostname, group='secondary', volumes=volumes, image=secondary_node_image)
                        for hostname in args.secondary_nodes]
+    nodes = [primary_node] + secondary_nodes
 
-    cluster = Cluster(primary_node, *secondary_nodes)
-    cluster.primary_node = primary_node
-    cluster.secondary_nodes = secondary_nodes
+    if args.kerberos:
+        kerberos_config_host_dir = '{}/kerberos'.format(clusterdock_config_host_dir)
+        volumes = [{kerberos_config_host_dir: KERBEROS_CONFIG_CONTAINER_DIR}]
+        for node in nodes:
+            node.volumes.extend(volumes)
 
+        kdc_node = Node(hostname=KDC_HOSTNAME, group='kdc', image=KDC_IMAGE, volumes=volumes)
+
+    cluster = Cluster(*nodes + ([kdc_node] if args.kerberos else []))
     for node in cluster.nodes:
         node.volumes.append({'/sys/fs/cgroup': '/sys/fs/cgroup'})
         # do not use tempfile.mkdtemp, as systemd wont be able to bring services up when temp ends to be created in
         # /var/tmp/ directory
         node.volumes.append(['/run', '/run/lock'])
 
-    cluster.start(args.network)
+    cluster.primary_node = primary_node
+    cluster.secondary_nodes = secondary_nodes
+    cluster_nodes = [cluster.primary_node] + cluster.secondary_nodes
+    cluster.start(args.network, pull_images=args.always_pull)
 
-    hdp_version_tuple = version_tuple(args.hdp_version)
+    if args.kerberos:
+        cluster.kdc_node = kdc_node
+        _configure_kdc(cluster, args.kerberos_principals, args.kerberos_ticket_lifetime, quiet=quiet)
+        _install_kerberos_clients(nodes, quiet=quiet)
+        if args.kerberos_principals:
+            _create_kerberos_cluster_users(nodes, args.kerberos_principals, quiet=quiet)
 
     logger.debug('Starting PostgreSQL for Ambari server ...')
     # Need this as init system in Docker misreports on postgres start initially
@@ -119,18 +144,18 @@ def main(args):
     logger.info('Ambari server is now reachable at %s', server_url)
 
     logger.info('Starting Ambari agents ...')
-    for node in cluster:
+    for node in cluster_nodes:
         logger.debug('Starting Ambari agent on %s ...', node.fqdn)
         node.execute('ambari-agent start', quiet=quiet)
 
     ambari = Ambari(server_url, username='admin', password='admin')
 
-    def condition(ambari, cluster):
-        cluster_hosts = {node.fqdn for node in cluster}
+    def condition(ambari, nodes):
+        cluster_hosts = {node.fqdn for node in nodes}
         ambari_hosts = {host.host_name for host in ambari.hosts}
         logger.debug('Cluster hosts: %s; Ambari hosts: %s', cluster_hosts, ambari_hosts)
         return cluster_hosts == ambari_hosts
-    wait_for_condition(condition=condition, condition_args=[ambari, cluster])
+    wait_for_condition(condition=condition, condition_args=[ambari, cluster_nodes])
 
     service_types_to_leave = (args.include_services.upper().split(',')
                               if args.include_services else [])
@@ -174,6 +199,10 @@ def main(args):
     if 'HIVE' in service_names:
         primary_node.execute('touch /etc/hive/sys.db.created', quiet=quiet)
 
+    if args.kerberos:
+        logger.info('Configure Ambari for Kerberos ...')
+        _configure_ambari_for_kerberos(ambari, cluster, args.kerberos_ticket_lifetime)
+
     logger.info('Waiting for components to be ready ...')
     def condition(ambari):
         comps = ambari.clusters(DEFAULT_CLUSTER_NAME).cluster.host_components.refresh()
@@ -202,8 +231,9 @@ def main(args):
 
 def _update_node_names(cluster, quiet):
     logger.info('Stopping Ambari agents ...')
-    commands = cluster.execute('ambari-agent stop', quiet=quiet)
-    for node, command in commands.items():
+    nodes = [cluster.primary_node] + cluster.secondary_nodes
+    for node in nodes:
+        command = node.execute('ambari-agent stop', quiet=quiet)
         if command.exit_code != 0:
             raise Exception('Ambari agent on node ({}) returned non-zero exit code ({}) while '
                             'stopping. Full output:'
@@ -227,7 +257,7 @@ def _update_node_names(cluster, quiet):
                '/var/log/ambari-server/ambari-server.out 2>&1')
     cluster.primary_node.execute(command, quiet=quiet)
 
-    for node in cluster:
+    for node in nodes:
         ambari_agent_config = node.get_file(AMBARI_AGENT_CONFIG_FILE_PATH)
 
         logger.debug('Changing server hostname to %s ...', cluster.primary_node.fqdn)
@@ -245,6 +275,214 @@ def _remove_files(nodes, files, quiet):
                 ', '.join(node.fqdn for node in nodes))
     for node in nodes:
         node.execute(command=command, quiet=quiet)
+
+
+def ambari_get_current_config(ambari, cluster_name, config_type):
+    items = ambari.clusters(cluster_name).configurations(config_type).items
+    current_tag = items.parent.cluster.desired_configs[items.parent.type]['tag']
+    items.inflate()
+    current_item = {}
+    for model in items._models:
+        if model.tag == current_tag:
+            current_item = (model.items[0] if (model.items and len(model.items) > 0) else {})
+            break
+    return current_item
+
+
+def _configure_kdc(cluster, kerberos_principals, kerberos_ticket_lifetime, quiet):
+    kdc_node = cluster.kdc_node
+
+    logger.info('Updating KDC configurations ...')
+    realm = cluster.network.upper()
+
+    logger.debug('Updating krb5.conf ...')
+    krb5_conf = cluster.kdc_node.get_file(KDC_KRB5_CONF_FILENAME)
+    # Here '\g<1>' represents group matched in regex which is the original default value of ticket_lifetime.
+    ticket_lifetime_replacement = kerberos_ticket_lifetime if kerberos_ticket_lifetime else '\g<1>'
+    krb5_conf_contents = re.sub(r'EXAMPLE.COM', realm,
+                                re.sub(r'example.com', cluster.network,
+                                       re.sub(r'ticket_lifetime = ((.)*)',
+                                              r'ticket_lifetime = {}'.format(ticket_lifetime_replacement),
+                                              re.sub(r'kerberos.example.com',
+                                                     kdc_node.fqdn,
+                                                     krb5_conf))))
+    kdc_node.put_file(KDC_KRB5_CONF_FILENAME, krb5_conf_contents)
+
+    logger.debug('Updating kdc.conf ...')
+    kdc_conf = kdc_node.get_file(KDC_CONF_FILENAME)
+    max_time_replacement = kerberos_ticket_lifetime if kerberos_ticket_lifetime else '1d'
+    kdc_node.put_file(KDC_CONF_FILENAME,
+                      re.sub(r'EXAMPLE.COM', realm,
+                             re.sub(r'\[kdcdefaults\]',
+                                    r'[kdcdefaults]\n max_renewablelife = 7d\n max_life = {}'.format(max_time_replacement),
+                                    kdc_conf)))
+
+    logger.debug('Updating kadm5.acl ...')
+    kadm5_acl = kdc_node.get_file(KDC_ACL_FILENAME)
+    kdc_node.put_file(KDC_ACL_FILENAME,
+                      re.sub(r'EXAMPLE.COM', realm, kadm5_acl))
+
+    logger.info('Starting KDC ...')
+
+    kdc_commands = [
+        'kdb5_util create -s -r {} -P kdcadmin'.format(realm),
+        'kadmin.local -q "addprinc -pw {} {}@{}"'.format(KERBEROS_USER_PRINCIPAL_PASSWORD,
+                                                         KERBEROS_USER_PRINCIPAL_PREFIX, realm)
+    ]
+    if kerberos_principals:
+        principals = ['{}@{}'.format(primary, realm)
+                      for primary in kerberos_principals.split(',')]
+        if kerberos_ticket_lifetime:
+            kdc_commands.extend([('kadmin.local -q "addprinc -maxlife {}sec '
+                                  '-maxrenewlife 5day -randkey {}"'.format(kerberos_ticket_lifetime, principal))
+                                 for principal in principals])
+        else:
+            kdc_commands.extend(['kadmin.local -q "addprinc -randkey {}"'.format(principal)
+                                 for principal in principals])
+        kdc_commands.append('kadmin.local -q '
+                            '"xst -norandkey -k {} {}"'.format(KDC_KEYTAB_FILENAME,
+                                                               ' '.join(principals)))
+    kdc_commands.extend(['service krb5kdc start',
+                         'service kadmin start',
+                         'authconfig --enablekrb5 --update',
+                         'cp -f {} {}'.format(KDC_KRB5_CONF_FILENAME,
+                                              KERBEROS_CONFIG_CONTAINER_DIR)])
+    if kerberos_principals:
+        kdc_commands.append('chmod 644 {}'.format(KDC_KEYTAB_FILENAME))
+
+    kdc_node.execute(' && '.join(kdc_commands),
+                     quiet=quiet)
+
+    logger.info('Validating health of Kerberos services ...')
+
+    def condition(node, services, quiet):
+        services_with_poor_health = [service
+                                     for service in services
+                                     if node.execute(command='service {} status'.format(service),
+                                                     quiet=quiet).exit_code != 0]
+        if services_with_poor_health:
+            logger.debug('Services with poor health: %s',
+                         ', '.join(services_with_poor_health))
+        # Return True if the list of services with poor health is empty.
+        return not bool(services_with_poor_health)
+    wait_for_condition(condition=condition, condition_args=[kdc_node,
+                                                            ['krb5kdc', 'kadmin'],
+                                                            quiet])
+
+
+def _install_kerberos_clients(nodes, quiet):
+    logger.info('Installing Kerberos libraries on Cluster nodes ...')
+    for node in nodes:
+        if node.execute('yum list installed yum-plugin-ovl', quiet=quiet).exit_code != 0:
+            logger.debug('Installing yum-plugin-ovl to workaround https://git.io/vFvPW ...')
+            node.execute('yum -y -q install yum-plugin-ovl', quiet=quiet)
+
+        command = ('yum -y -q install openldap-clients krb5-libs krb5-workstation'
+                   if node.group == 'primary'
+                   else 'yum -y -q install krb5-libs krb5-workstation')
+        node.execute(command=command, quiet=quiet)
+
+
+def _create_kerberos_cluster_users(nodes, kerberos_principals, quiet):
+    commands = ['useradd -u {} -g hadoop {}'.format(uid, primary)
+                for uid, primary in enumerate(kerberos_principals.split(','),
+                                              start=LINUX_USER_ID_START)]
+    for node in nodes:
+        node.execute('; '.join(commands), quiet=quiet)
+
+
+def _configure_ambari_for_kerberos(ambari, cluster, kerberos_ticket_lifetime):
+    # based off of https://github.com/apache/ambari/blob/trunk/ambari-server/docs/security/kerberos/enabling_kerberos.md
+    cluster_nodes = [cluster.primary_node] + cluster.secondary_nodes
+    hdp_cluster = ambari.clusters(DEFAULT_CLUSTER_NAME)
+    realm = cluster.network.upper()
+    ticket_lifetime_replacement = kerberos_ticket_lifetime if kerberos_ticket_lifetime else '24h'
+
+    hdp_cluster.services.create('KERBEROS')
+    hdp_cluster.services('KERBEROS').components.create('KERBEROS_CLIENT')
+
+    data = [{
+        'Clusters': {
+            'desired_config': {
+                'type': 'krb5-conf',
+                'tag': str(time.time()),
+                'properties': {
+                    'domains': '',
+                    'manage_krb5_conf': 'true',
+                    'conf_dir': '/etc',
+                    'content': ("[libdefaults]\n  renew_lifetime = 7d\n  forwardable = true\n  default_realm = {{realm}}\n  " +
+                                ("ticket_lifetime = {}\n  ".format(ticket_lifetime_replacement)) +
+                                "dns_lookup_realm = false\n  dns_lookup_kdc = false\n  default_ccache_name = /tmp/krb5cc_%{uid}\n  #default_tgs_enctypes = {{encryption_types}}\n  #default_tkt_enctypes = {{encryption_types}}\n{% if domains %}\n[domain_realm]\n{%- for domain in domains.split(',') %}\n  {{domain|trim()}} = {{realm}}\n{%- endfor %}\n{% endif %}\n[logging]\n  default = FILE:/var/log/krb5kdc.log\n  admin_server = FILE:/var/log/kadmind.log\n  kdc = FILE:/var/log/krb5kdc.log\n\n[realms]\n  {{realm}} = {\n{%- if master_kdc %}\n    master_kdc = {{master_kdc|trim()}}\n{%- endif -%}\n{%- if kdc_hosts > 0 -%}\n{%- set kdc_host_list = kdc_hosts.split(',')  -%}\n{%- if kdc_host_list and kdc_host_list|length > 0 %}\n    admin_server = {{admin_server_host|default(kdc_host_list[0]|trim(), True)}}\n{%- if kdc_host_list -%}\n{%- if master_kdc and (master_kdc not in kdc_host_list) %}\n    kdc = {{master_kdc|trim()}}\n{%- endif -%}\n{% for kdc_host in kdc_host_list %}\n    kdc = {{kdc_host|trim()}}\n{%- endfor -%}\n{% endif %}\n{%- endif %}\n{%- endif %}\n  }\n\n{# Append additional realm declarations below #}")
+                }
+            }
+        }
+    }, {
+        'Clusters': {
+            'desired_config': {
+                'type': 'kerberos-env',
+                'tag': str(time.time()),
+                'properties': {
+                    'kdc_type': 'mit-kdc',
+                    'manage_identities': 'true',
+                    'create_ambari_principal': 'true',
+                    'manage_auth_to_local': 'true',
+                    'install_packages': 'false',
+                    'encryption_types': 'aes des3-cbc-sha1 rc4 des-cbc-md5',
+                    'realm' : realm,
+                    'kdc_hosts' : cluster.kdc_node.fqdn,
+                    'master_kdc' : '',
+                    'admin_server_host' : cluster.kdc_node.fqdn,
+                    'executable_search_paths' : '/usr/bin, /usr/kerberos/bin, /usr/sbin, /usr/lib/mit/bin, /usr/lib/mit/sbin',
+                    'service_check_principal_name' : '${cluster}-${short_date}',
+                    'case_insensitive_username_rules' : 'false'
+                }
+            }
+        }
+    }]
+    ambari.client.put(hdp_cluster.url, data=json.dumps(data))
+
+    for node in cluster_nodes:
+        host_components = ambari.clusters(DEFAULT_CLUSTER_NAME).hosts(node.fqdn).components
+        host_components.create('KERBEROS_CLIENT').wait()
+
+    kerberos_service = ambari.clusters(DEFAULT_CLUSTER_NAME).services('KERBEROS')
+    data = {
+        'RequestInfo': {
+            'context': 'Install Kerberos Service',
+            'operation_level': {
+                'level': 'CLUSTER',
+                'cluster_name': DEFAULT_CLUSTER_NAME
+            }
+        },
+        'Body': {
+            'ServiceInfo': {
+                'state':'INSTALLED'
+            }
+        }
+    }
+    response = ambari.client.put(kerberos_service.url, data=json.dumps(data))
+    request = Request(hdp_cluster.requests, href=response.get('href'), data=response.get('Requests'))
+    request.wait()
+
+    data = {
+        'Credential': {
+            'principal': '{}@{}'.format(KERBEROS_USER_PRINCIPAL_PREFIX, realm),
+            'key': KERBEROS_USER_PRINCIPAL_PASSWORD,
+            'type': 'temporary'
+        }
+    }
+    # gets to: http://node-1.cluster:8080/api/v1/clusters/cluster/credentials/kdc.admin.credential
+    url = join_url_parts(hdp_cluster.url, 'credentials', 'kdc.admin.credential')
+    ambari.client.post(url, data=json.dumps(data))
+
+    data = {
+        'Clusters': {
+            'security_type': 'KERBEROS'
+        }
+    }
+    response = ambari.client.put(hdp_cluster.url, data=json.dumps(data))
+    request = Request(hdp_cluster.requests, href=response.get('href'), data=response.get('Requests'))
+    request.wait()
 
 
 def _configure_atlas(ambari, hdp_version, atlas_server_host):
@@ -400,15 +638,3 @@ def _configure_atlas(ambari, hdp_version, atlas_server_host):
         'atlas.kafka.bootstrap.servers': '{}:{}'.format(atlas_server_host, kafka_broker_port),
         'atlas.kafka.zookeeper.connect': '{}:{}'.format(atlas_server_host, zookeeper_connect_port),
         'atlas.rest.address': 'http://{}:{}'.format(atlas_server_host, DEFAULT_ATLAS_REST_PORT)})
-
-
-def ambari_get_current_config(ambari, cluster_name, config_type):
-    items = ambari.clusters(cluster_name).configurations(config_type).items
-    current_tag = items.parent.cluster.desired_configs[items.parent.type]['tag']
-    items.inflate()
-    current_item = {}
-    for model in items._models:
-        if model.tag == current_tag:
-            current_item = (model.items[0] if (model.items and len(model.items) > 0) else {})
-            break
-    return current_item

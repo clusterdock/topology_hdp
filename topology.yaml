@@ -57,6 +57,16 @@ start args:
     --include-services, -i:
         help: If specified, a comma-separated list of service types to include in the HDP cluster
         metavar: svc1,svc2,...
+    --kerberos, -k:
+        action: store_true
+        help: If specified, enable Kerberos for the cluster
+    --kerberos-principals:
+        help: If specified, a comma-separated list of Kerberos user principals to create in KDC
+        metavar: princ1,princ2,...
+    --kerberos-ticket-lifetime:
+        default: 86400
+        help: If specified, the maximum time period in seconds for which a ticket may be valid in the realm
+        metavar: seconds
     --predictable:
         action: store_true
         help: If specified, attempt to expose container ports to the same port number on the host
